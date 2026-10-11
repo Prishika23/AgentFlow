@@ -1,10 +1,15 @@
-from fastapi import FastAPI, HTTPException
+import os
+
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from google.genai.errors import APIError
 from pydantic import BaseModel
+
 from ai.orchestrator import Orchestrator
 
+
 app = FastAPI(title="AgentFlow Local AI Assistant")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,6 +19,8 @@ app.add_middleware(
 )
 
 orchestrator = Orchestrator()
+
+AGENTFLOW_TOKEN = os.getenv("AGENTFLOW_TOKEN")
 
 
 class ChatRequest(BaseModel):
@@ -27,11 +34,32 @@ def health():
 
 
 @app.post("/api/chat")
-def chat(req: ChatRequest):
+def chat(
+    req: ChatRequest,
+    x_agentflow_token: str | None = Header(default=None),
+):
+    if not AGENTFLOW_TOKEN:
+        raise HTTPException(
+            status_code=500,
+            detail="AGENTFLOW_TOKEN is not configured on the backend.",
+        )
+
+    if x_agentflow_token != AGENTFLOW_TOKEN:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized.",
+        )
+
     try:
         return orchestrator.handle(req.session_id, req.message)
+
     except APIError as exc:
-        status_code = exc.code if isinstance(exc.code, int) and 400 <= exc.code <= 599 else 502
+        status_code = (
+            exc.code
+            if isinstance(exc.code, int) and 400 <= exc.code <= 599
+            else 502
+        )
+
         if status_code == 503:
             detail = "Gemini is temporarily unavailable. Please retry in a moment."
         elif status_code == 429:
@@ -40,6 +68,14 @@ def chat(req: ChatRequest):
             detail = "Gemini rejected the API key. Check GEMINI_API_KEY in backend/.env."
         else:
             detail = f"Gemini API request failed (HTTP {status_code})."
-        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+        raise HTTPException(
+            status_code=status_code,
+            detail=detail,
+        ) from exc
+
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
